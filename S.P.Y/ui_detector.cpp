@@ -1,3 +1,4 @@
+//ui_detector
 #include "ui_detector.h"
 
 // Constructor for the UIDetector class
@@ -157,121 +158,195 @@ cv::Mat UIDetector::preprocessImage(const cv::Mat& image, bool isDarkTheme) {
 }
 
 std::vector<cv::Rect> UIDetector::detectInputFields(const cv::Mat& image, bool isDarkTheme) {
-    // Preprocessing with optimized parameters
+    // Preprocessing with improved parameters for both themes
     cv::Mat processed = image.clone();
     cv::Mat gray;
     cv::cvtColor(processed, gray, cv::COLOR_BGR2GRAY);
 
-    // Fast blur for noise reduction - replaced Gaussian with median for speed
-    cv::medianBlur(gray, gray, 5);
+    // Apply adaptive thresholding with optimal parameters
+    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0);
 
-    // Optimized edge detection with safe parameters
+    // Use different edge detection parameters based on theme
     cv::Mat edges;
-    int lowThreshold = isDarkTheme ? 20 : 30;
-    int highThreshold = isDarkTheme ? 60 : 90;
+    int lowThreshold = isDarkTheme ? 10 : 20;  // Lower thresholds to catch more edges
+    int highThreshold = isDarkTheme ? 40 : 70;
     cv::Canny(gray, edges, lowThreshold, highThreshold);
 
-    // More efficient dilation with smaller kernel
+    // Use larger structuring element for more robust edge connection
     cv::Mat dilatedEdges;
-    cv::dilate(edges, dilatedEdges, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)));
+    cv::dilate(edges, dilatedEdges, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7))); // Increased from 5x5
 
-    // Find contours - using RETR_EXTERNAL is faster as it only gets outer contours
+    // Find contours with improved parameters
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(dilatedEdges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(dilatedEdges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
 
     std::vector<cv::Rect> inputFields;
     cv::Size imgSize = image.size();
 
-    // Fast filtering of contours
+    // More lenient field detection parameters
     for (const auto& contour : contours) {
-        // Quick area check first to skip small contours faster
-        double area = cv::contourArea(contour);
-        if (area < 100 || area > imgSize.area() * 0.2) continue;
+        if (cv::contourArea(contour) < 50) continue;  // Even lower minimum area
 
         cv::Rect rect = cv::boundingRect(contour);
         double aspectRatio = static_cast<double>(rect.width) / rect.height;
 
-        // Field heuristics
-        if (rect.width > imgSize.width * 0.1 &&
-            rect.height > 15 && rect.height < 100 &&
-            aspectRatio > 1.5 && aspectRatio < 20) {
+        // More inclusive aspect ratio and size constraints
+        if (rect.width > imgSize.width * 0.08 && // Even less restrictive width
+            rect.height > 10 && rect.height < 120 && // Wider height range
+            aspectRatio > 1.2 && aspectRatio < 30) { // More inclusive aspect ratio
 
-            // Simple position check
-            if (rect.y > imgSize.height * 0.1 &&
-                rect.y < imgSize.height * 0.9) {
+            // Less restrictive position requirements
+            bool isInFormPosition = rect.y > imgSize.height * 0.05 &&
+                rect.y < imgSize.height * 0.95 &&
+                rect.x > imgSize.width * 0.03 &&
+                rect.x + rect.width < imgSize.width * 0.97;
+
+            if (isInFormPosition) {
                 inputFields.push_back(rect);
             }
         }
     }
 
-    // If we found enough fields, don't run the slower methods
-    if (inputFields.size() >= 2) {
-        return inputFields;
+    // Additional multi-scale detection for input fields
+    // This helps catch fields that might be missed by edge detection
+    std::vector<cv::Rect> additionalFields;
+
+    // Method 1: Color-based detection
+    cv::Mat hsv;
+    cv::cvtColor(image, hsv, cv::COLOR_BGR2HSV);
+    std::vector<cv::Mat> channels;
+    cv::split(hsv, channels);
+
+    // Multiple threshold values to catch different field styles
+    std::vector<int> threshValues;
+    if (isDarkTheme) {
+        threshValues = { 30, 50, 70 }; // Multiple thresholds for dark themes
+    }
+    else {
+        threshValues = { 180, 200, 220 }; // Multiple thresholds for light themes
     }
 
-    // Second method: direct binary thresholding - very fast
-    cv::Mat binaryImage;
+    for (int threshValue : threshValues) {
+        cv::Mat valueThresh;
+        cv::threshold(channels[2], valueThresh, threshValue, 255,
+            isDarkTheme ? cv::THRESH_BINARY : cv::THRESH_BINARY_INV);
 
-    // Adapt threshold based on theme
-    int threshVal = isDarkTheme ? 60 : 200;
-    cv::threshold(gray, binaryImage, threshVal, 255, isDarkTheme ? cv::THRESH_BINARY : cv::THRESH_BINARY_INV);
+        // Clean up with morphological operations
+        cv::Mat morphed;
+        cv::morphologyEx(valueThresh, morphed, cv::MORPH_CLOSE,
+            cv::getStructuringElement(cv::MORPH_RECT, cv::Size(21, 5)));
 
-    // Find contours in binary image
-    std::vector<std::vector<cv::Point>> binaryContours;
-    cv::findContours(binaryImage, binaryContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        std::vector<std::vector<cv::Point>> colorContours;
+        cv::findContours(morphed, colorContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    for (const auto& contour : binaryContours) {
-        double area = cv::contourArea(contour);
-        if (area < 100 || area > imgSize.area() * 0.2) continue;
+        for (const auto& contour : colorContours) {
+            if (cv::contourArea(contour) < 50) continue;
 
-        cv::Rect rect = cv::boundingRect(contour);
-        double aspectRatio = static_cast<double>(rect.width) / rect.height;
+            cv::Rect rect = cv::boundingRect(contour);
+            double aspectRatio = static_cast<double>(rect.width) / rect.height;
 
-        if (rect.width > imgSize.width * 0.1 &&
-            rect.height > 15 && rect.height < 100 &&
-            aspectRatio > 1.5 && aspectRatio < 20) {
+            if (rect.width > imgSize.width * 0.08 &&
+                rect.height > 10 && rect.height < 120 &&
+                aspectRatio > 1.2 && aspectRatio < 30) {
 
-            // Check if this is a novel field
-            bool isNovel = true;
-            for (const auto& existingField : inputFields) {
-                double iou = (existingField & rect).area() / static_cast<double>((existingField.area() + rect.area() - (existingField & rect).area()));
-                if (iou > 0.3) {
-                    isNovel = false;
-                    break;
-                }
-            }
-
-            if (isNovel) {
-                inputFields.push_back(rect);
+                additionalFields.push_back(rect);
             }
         }
     }
 
-    // If still not enough fields, look for rectangular shapes
+    // Method 2: Saturation-based detection (often works well for input fields)
+    cv::Mat satThresh;
+    cv::threshold(channels[1], satThresh, 30, 255, cv::THRESH_BINARY_INV); // Low saturation areas
+
+    cv::Mat satMorphed;
+    cv::morphologyEx(satThresh, satMorphed, cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(21, 5)));
+
+    std::vector<std::vector<cv::Point>> satContours;
+    cv::findContours(satMorphed, satContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    for (const auto& contour : satContours) {
+        if (cv::contourArea(contour) < 50) continue;
+
+        cv::Rect rect = cv::boundingRect(contour);
+        double aspectRatio = static_cast<double>(rect.width) / rect.height;
+
+        if (rect.width > imgSize.width * 0.08 &&
+            rect.height > 10 && rect.height < 120 &&
+            aspectRatio > 1.2 && aspectRatio < 30) {
+
+            additionalFields.push_back(rect);
+        }
+    }
+
+    // Add additional fields that don't overlap significantly with existing ones
+    for (const auto& newField : additionalFields) {
+        bool isNovel = true;
+        for (const auto& existing : inputFields) {
+            // Calculate intersection over union
+            cv::Rect intersection = existing & newField;
+            double iou = intersection.area() / static_cast<double>((existing.area() + newField.area() - intersection.area()));
+
+            if (iou > 0.2) { // Lower threshold to catch more potential overlaps
+                isNovel = false;
+                break;
+            }
+        }
+
+        if (isNovel) {
+            inputFields.push_back(newField);
+        }
+    }
+
     if (inputFields.size() < 2) {
-        // Use rectangle detection instead of HoughCircles
-        std::vector<std::vector<cv::Point>> approxContours;
+        // Method 3: Look for rectangular areas with consistent brightness
+        cv::Mat grayBlurred;
+        cv::GaussianBlur(gray, grayBlurred, cv::Size(9, 9), 0);
 
-        for (const auto& contour : contours) {
+        cv::Mat gradX, gradY;
+        cv::Sobel(grayBlurred, gradX, CV_32F, 1, 0);
+        cv::Sobel(grayBlurred, gradY, CV_32F, 0, 1);
+
+        // Calculate magnitude of gradient
+        cv::Mat gradMag;
+        cv::magnitude(gradX, gradY, gradMag);
+
+        // Normalize and convert to 8-bit
+        cv::normalize(gradMag, gradMag, 0, 255, cv::NORM_MINMAX);
+        cv::Mat gradMag8U;
+        gradMag.convertTo(gradMag8U, CV_8U);
+
+        // Threshold gradient magnitude to find edges
+        cv::Mat gradThresh;
+        cv::threshold(gradMag8U, gradThresh, 50, 255, cv::THRESH_BINARY);
+
+        // Find contours of high gradient regions (potential field boundaries)
+        std::vector<std::vector<cv::Point>> gradContours;
+        cv::findContours(gradThresh, gradContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+        for (const auto& contour : gradContours) {
             if (cv::contourArea(contour) < 100) continue;
 
-            // Approximate contour to detect rectangular shapes
-            std::vector<cv::Point> approx;
-            cv::approxPolyDP(contour, approx, 0.04 * cv::arcLength(contour, true), true);
+            // Approximate contour to get simpler polygon
+            std::vector<cv::Point> approxCurve;
+            cv::approxPolyDP(contour, approxCurve, 0.02 * cv::arcLength(contour, true), true);
 
-            // Check if it has 4-6 sides (rectangular)
-            if (approx.size() >= 4 && approx.size() <= 6) {
-                cv::Rect rect = cv::boundingRect(approx);
+            // Check if polygon has 4-6 sides (rectangular-ish)
+            if (approxCurve.size() >= 4 && approxCurve.size() <= 6) {
+                cv::Rect rect = cv::boundingRect(approxCurve);
                 double aspectRatio = static_cast<double>(rect.width) / rect.height;
 
-                if (rect.width > imgSize.width * 0.1 &&
-                    rect.height > 15 && rect.height < 100 &&
-                    aspectRatio > 1.5 && aspectRatio < 20) {
+                if (rect.width > imgSize.width * 0.08 &&
+                    rect.height > 10 && rect.height < 120 &&
+                    aspectRatio > 1.2 && aspectRatio < 30) {
 
+                    // Check if this is a novel field
                     bool isNovel = true;
-                    for (const auto& existingField : inputFields) {
-                        double iou = (existingField & rect).area() / static_cast<double>((existingField.area() + rect.area() - (existingField & rect).area()));
-                        if (iou > 0.3) {
+                    for (const auto& existing : inputFields) {
+                        double iou = (existing & rect).area() /
+                            static_cast<double>((existing.area() + rect.area() - (existing & rect).area()));
+
+                        if (iou > 0.2) {
                             isNovel = false;
                             break;
                         }
@@ -285,7 +360,47 @@ std::vector<cv::Rect> UIDetector::detectInputFields(const cv::Mat& image, bool i
         }
     }
 
-    // Sort by Y-coordinate
+    // Final step: Merge overlapping or very close rectangles
+    if (!inputFields.empty()) {
+        std::vector<cv::Rect> mergedFields;
+        std::vector<bool> used(inputFields.size(), false);
+
+        for (size_t i = 0; i < inputFields.size(); i++) {
+            if (used[i]) continue;
+
+            cv::Rect mergedRect = inputFields[i];
+            used[i] = true;
+
+            bool merged;
+            do {
+                merged = false;
+                for (size_t j = 0; j < inputFields.size(); j++) {
+                    if (used[j] || i == j) continue;
+
+                    // Check if rects overlap or are very close
+                    cv::Rect r1 = mergedRect;
+                    cv::Rect r2 = inputFields[j];
+
+                    // Expand rects slightly to catch nearby fields
+                    r1.x -= 5; r1.y -= 5; r1.width += 10; r1.height += 10;
+                    r2.x -= 5; r2.y -= 5; r2.width += 10; r2.height += 10;
+
+                    if ((r1 & r2).area() > 0) {
+                        // Merge the rectangles
+                        mergedRect = mergedRect | inputFields[j];
+                        used[j] = true;
+                        merged = true;
+                    }
+                }
+            } while (merged);
+
+            mergedFields.push_back(mergedRect);
+        }
+
+        inputFields = mergedFields;
+    }
+
+    // Remove duplicates and sort by Y-coordinate (top to bottom)
     std::sort(inputFields.begin(), inputFields.end(),
         [](const cv::Rect& a, const cv::Rect& b) { return a.y < b.y; });
 

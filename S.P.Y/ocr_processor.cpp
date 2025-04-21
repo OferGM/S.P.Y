@@ -1,3 +1,4 @@
+//ocr processor
 #include "ocr_processor.h"
 
 OCRProcessor::OCRProcessor() {

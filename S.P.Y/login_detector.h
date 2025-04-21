@@ -1,3 +1,4 @@
+//login_detector.h
 #pragma once
 #include "common.h"
 #include "ocr_processor.h"

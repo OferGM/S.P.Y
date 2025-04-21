@@ -1,3 +1,4 @@
+//login_detector.cpp
 #include "login_detector.h"
 
 LoginDetector::LoginDetector() : confidenceThreshold(0.35f) {
@@ -88,40 +89,66 @@ LoginDetector::ExtractedFields LoginDetector::extractLoginFields(const std::stri
     fields.usernameFieldPresent = false;
     fields.passwordFieldPresent = false;
 
-    // Validate image file - quick early return if invalid
+    // Verify that the image file exists and is valid
     if (!ImageUtils::isValidImageFile(imagePath)) return fields;
 
-    // Load image and downscale large images for faster processing
+    // Load the image and detect if it has a dark theme
     cv::Mat originalImage = cv::imread(imagePath);
-
-    // Downscale large images
-    if (originalImage.cols > 1200 || originalImage.rows > 1200) {
-        float scale = 1200.0f / std::max(originalImage.cols, originalImage.rows);
-        cv::resize(originalImage, originalImage, cv::Size(), scale, scale, cv::INTER_AREA);
-    }
-
-    // Detect theme - cheaper version
     bool isDarkTheme = ImageUtils::detectTheme(originalImage);
 
-    // Skip full login detection - go directly to field detection
-    // This saves significant time
+    // Log theme detection for debugging
+    Logger::log(Logger::Level::INFO, std::string("Image appears to be ") +
+        (isDarkTheme ? "dark" : "light") + " themed");
 
-    // Detect input fields first - this is faster than OCR
+    // First, check if this is actually a login page
+    bool isLoginPage = detectLogin(imagePath, OperationMode::DETECT_LOGIN);
+
+    if (!isLoginPage) {
+        Logger::log(Logger::Level::INFO, "Image doesn't appear to be a login page, but proceeding with field extraction anyway");
+        // Continue anyway - we'll still try to extract fields even if confidence is low
+    }
+
+    // Process the image with OCR
+    auto ocrResult = ocrProcessor.processImage(originalImage, isDarkTheme);
+    Logger::log(Logger::Level::INFO, "OCR processing completed");
+
+    // Detect input fields in the image with enhanced detection
     std::vector<cv::Rect> inputFields = uiDetector.detectInputFields(originalImage, isDarkTheme);
+    Logger::log(Logger::Level::INFO, "Detected " + std::to_string(inputFields.size()) + " input fields");
 
-    // Only perform OCR if we found input fields
-    std::vector<WordBox> wordBoxes;
-    if (!inputFields.empty()) {
-        // Run OCR - use a simplified version when possible
-        auto ocrResult = ocrProcessor.processImage(originalImage, isDarkTheme);
-        wordBoxes = ocrResult.second;
-    }
-    else {
-        return fields; // No input fields found, return early
+    // If no input fields found, try with adjusted parameters
+    if (inputFields.empty()) {
+        Logger::log(Logger::Level::INFO, "No input fields detected, trying with adjusted parameters");
+
+        // Create a copy with adjusted contrast to improve field detection
+        cv::Mat enhancedImage;
+        double contrastAlpha = isDarkTheme ? 1.3 : 1.2; // Increase contrast
+        int brightnessBeta = isDarkTheme ? 10 : -10;    // Adjust brightness
+
+        originalImage.convertTo(enhancedImage, -1, contrastAlpha, brightnessBeta);
+
+        // Try detecting fields on enhanced image
+        inputFields = uiDetector.detectInputFields(enhancedImage, isDarkTheme);
+        Logger::log(Logger::Level::INFO, "Detected " + std::to_string(inputFields.size()) +
+            " input fields after enhancement");
     }
 
-    // Analyze fields
-    fields = analyzeLoginFields(originalImage, inputFields, wordBoxes);
+    // If still no input fields found, return empty result
+    if (inputFields.empty()) {
+        Logger::log(Logger::Level::INFO, "No input fields detected for extraction");
+        return fields;
+    }
+
+    // Analyze the detected fields and extract username/password info
+    fields = analyzeLoginFields(originalImage, inputFields, ocrResult.second);
+
+    // Log extraction results
+    Logger::log(Logger::Level::INFO, "Username field present: " +
+        std::string(fields.usernameFieldPresent ? "true" : "false"));
+    Logger::log(Logger::Level::INFO, "Username content: " + fields.username);
+    Logger::log(Logger::Level::INFO, "Password field present: " +
+        std::string(fields.passwordFieldPresent ? "true" : "false"));
+    Logger::log(Logger::Level::INFO, "Password dots count: " + std::to_string(fields.passwordDots));
 
     return fields;
 }
@@ -183,22 +210,18 @@ LoginDetector::ExtractedFields LoginDetector::analyzeLoginFields(
                 std::transform(lowercaseWord.begin(), lowercaseWord.end(), lowercaseWord.begin(), ::tolower);
 
                 // Username indicators with adjusted weights
-                if (lowercaseWord.find("user") != std::string::npos) usernameScore += 4.0;  // Increased
-                if (lowercaseWord.find("email") != std::string::npos) usernameScore += 4.0; // Increased
-                if (lowercaseWord.find("mail") != std::string::npos) usernameScore += 3.0;  // Increased
-                if (lowercaseWord.find("login") != std::string::npos) usernameScore += 2.0;
-                if (lowercaseWord.find("name") != std::string::npos) usernameScore += 2.0;  // Increased
-                if (lowercaseWord.find("phone") != std::string::npos) usernameScore += 2.0; // Increased
-                if (lowercaseWord.find("account") != std::string::npos) usernameScore += 1.5; // Increased
-                if (lowercaseWord.find("id") != std::string::npos) usernameScore += 1.5;    // Increased
-                if (lowercaseWord.find("log") != std::string::npos) usernameScore += 1.0;   // Added
-                if (lowercaseWord.find("sign") != std::string::npos) usernameScore += 1.0;  // Added
+                if (lowercaseWord.find("user") != std::string::npos) usernameScore += 4.0;  
+                if (lowercaseWord.find("email") != std::string::npos) usernameScore += 4.0; 
+                if (lowercaseWord.find("mail") != std::string::npos) usernameScore += 3.0;  
+                if (lowercaseWord.find("name") != std::string::npos) usernameScore += 2.0;  
+                if (lowercaseWord.find("phone") != std::string::npos) usernameScore += 2.0; 
+                if (lowercaseWord.find("account") != std::string::npos) usernameScore += 1.5; 
+                if (lowercaseWord.find("id") != std::string::npos) usernameScore += 1.5;    
 
                 // Password indicators with adjusted weights
-                if (lowercaseWord.find("pass") != std::string::npos) passwordScore += 4.0;  // Increased
+                if (lowercaseWord.find("pass") != std::string::npos) passwordScore += 4.0;  
                 if (lowercaseWord == "pw") passwordScore += 3.0;
-                if (lowercaseWord.find("secret") != std::string::npos) passwordScore += 1.5; // Increased
-                if (lowercaseWord.find("pin") != std::string::npos) passwordScore += 1.5;   // Increased
+                if (lowercaseWord.find("pin") != std::string::npos) passwordScore += 1.5;   
             }
         }
 
@@ -347,216 +370,279 @@ int LoginDetector::countPasswordDots(const cv::Mat& passwordField) {
     cv::Mat grayField;
     cv::cvtColor(passwordField, grayField, cv::COLOR_BGR2GRAY);
 
-    // Fast blur to reduce noise while preserving dot shapes
-    cv::Mat blurred;
-    cv::medianBlur(grayField, blurred, 3);
-
-    // Use binary thresholding - more reliable than adaptive for small dots
+    // Apply adaptive thresholding for better dot detection - adjusted parameters
     cv::Mat binary;
-    // Different threshold strategies for different themes
-    double meanIntensity = cv::mean(blurred)[0];
-    bool isDarkTheme = meanIntensity < 128;
+    cv::adaptiveThreshold(grayField, binary, 255, cv::ADAPTIVE_THRESH_MEAN_C,
+        cv::THRESH_BINARY_INV, 11, 5); // Changed from GAUSSIAN to MEAN, adjusted C value
 
-    int threshValue = isDarkTheme ? 80 : 180;
-    cv::threshold(blurred, binary, threshValue, 255, isDarkTheme ? cv::THRESH_BINARY : cv::THRESH_BINARY_INV);
+    // Apply morphological operations to isolate dots - smaller kernel for smaller dots
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2, 2)); // Reduced from 3x3
+    cv::Mat morphed;
+    cv::morphologyEx(binary, morphed, cv::MORPH_OPEN, kernel);
 
-    // Simple connected components analysis - fastest method
+    // Multi-strategy approach for dot counting
+    int dotCount = 0;
+
+    // Strategy 1: Connected component analysis with adjusted parameters
     cv::Mat labels, stats, centroids;
-    int numComponents = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
+    int numComponents = cv::connectedComponentsWithStats(morphed, labels, stats, centroids);
 
-    // Filter components by size and shape
-    std::vector<double> dotAreas;
-    std::vector<cv::Point> dotCenters;
-
+    std::vector<int> dotAreas;
     for (int i = 1; i < numComponents; i++) { // Skip background (label 0)
         int area = stats.at<int>(i, cv::CC_STAT_AREA);
         int width = stats.at<int>(i, cv::CC_STAT_WIDTH);
         int height = stats.at<int>(i, cv::CC_STAT_HEIGHT);
 
-        // Check if this component has dot-like properties
-        if (area >= 1 && area <= 150 &&
-            width <= 20 && height <= 20 &&
-            std::abs(width - height) <= 5) { // Roughly square/circular
-
+        // More lenient size filtering - allow smaller dots
+        if (area > 1 && area < 400 && // Changed from 3-300 to 1-400
+            std::abs(width - height) < width * 0.7 && // More lenient aspect ratio check
+            width < passwordField.cols / 5) { // Wider dots allowed
             dotAreas.push_back(area);
-            dotCenters.push_back(cv::Point(centroids.at<double>(i, 0), centroids.at<double>(i, 1)));
         }
     }
 
-    // No dots found with primary method
-    if (dotAreas.empty()) {
-        return 0;
+    // If we found potential dots, use their count with improved filtering
+    if (!dotAreas.empty()) {
+        // Sort areas to find the most common dot size
+        std::sort(dotAreas.begin(), dotAreas.end());
+
+        // Find median dot area
+        int medianArea = dotAreas[dotAreas.size() / 2];
+
+        // Count dots with similar size to the median (more lenient filtering)
+        int count = 0;
+        for (int area : dotAreas) {
+            if (area > medianArea * 0.3 && area < medianArea * 3.0) { // More lenient range
+                count++;
+            }
+        }
+
+        dotCount = count;
     }
 
-    // Sort by area
-    std::sort(dotAreas.begin(), dotAreas.end());
+    // Strategy 2: Improved Hough Circles detection
+    if (dotCount < 3) { // Only use if connected components found too few dots
+        std::vector<cv::Vec3f> circles;
+        cv::HoughCircles(grayField, circles, cv::HOUGH_GRADIENT, 1,
+            grayField.rows / 40, // Reduced min distance between circles
+            30, 15, 1, grayField.rows / 8); // More lenient parameters
 
-    // Determine the most common dot size
-    double medianArea = dotAreas[dotAreas.size() / 2];
-
-    // Extract dots with similar area to filter outliers
-    std::vector<cv::Point> filteredDots;
-    for (size_t i = 0; i < dotAreas.size(); i++) {
-        if (dotAreas[i] >= medianArea * 0.3 && dotAreas[i] <= medianArea * 3.0) {
-            filteredDots.push_back(dotCenters[i]);
+        // If Hough circles found more dots, use that count
+        if (circles.size() > dotCount) {
+            dotCount = circles.size();
         }
     }
 
-    // Sort dots by horizontal position
-    std::sort(filteredDots.begin(), filteredDots.end(),
-        [](const cv::Point& a, const cv::Point& b) { return a.x < b.x; });
-
-    // Get horizontal spacing stats for uniform pattern detection
-    std::vector<int> spacings;
-    for (size_t i = 1; i < filteredDots.size(); i++) {
-        int spacing = filteredDots[i].x - filteredDots[i - 1].x;
-        if (spacing > 0) {
-            spacings.push_back(spacing);
+    // Strategy 3: Improved clustering algorithm
+    // Create horizontal histogram of dark pixels with lower threshold
+    std::vector<int> horizontalHist(passwordField.cols, 0);
+    for (int x = 0; x < passwordField.cols; x++) {
+        for (int y = 0; y < passwordField.rows; y++) {
+            if (binary.at<uchar>(y, x) > 0) {
+                horizontalHist[x]++;
+            }
         }
     }
 
-    // No valid spacings found
-    if (spacings.empty()) {
-        return filteredDots.size();
+    // Count clusters of dark pixels with more adaptive threshold
+    bool inCluster = false;
+    int clusters = 0;
+    int minWidth = 1; // Reduced minimum width to catch smaller dots
+    int currentWidth = 0;
+    double threshold = passwordField.rows * 0.15; // Lower threshold (15% vs 20%)
+
+    for (int x = 0; x < passwordField.cols; x++) {
+        if (horizontalHist[x] > threshold) { // Lower threshold for "dark" column
+            if (!inCluster) {
+                inCluster = true;
+                currentWidth = 1;
+            }
+            else {
+                currentWidth++;
+            }
+        }
+        else {
+            if (inCluster) {
+                if (currentWidth >= minWidth) {
+                    clusters++;
+                }
+                inCluster = false;
+            }
+        }
     }
 
-    // Calculate median spacing
-    std::sort(spacings.begin(), spacings.end());
-    int medianSpacing = spacings[spacings.size() / 2];
-
-    // Count dots that form a uniform pattern with consistent spacing
-    int patternCount = 1; // First dot is always part of pattern
-    int startX = filteredDots[0].x;
-
-    // Predict dot positions based on typical password masking patterns
-    int predictedDots = 1;
-    int fieldWidth = passwordField.cols;
-
-    // If we have enough dots to establish a pattern
-    if (filteredDots.size() >= 3) {
-        predictedDots = (fieldWidth - 10) / medianSpacing;
-
-        // Limit to reasonable range for password fields
-        if (predictedDots > 20) predictedDots = 20;
-        if (predictedDots < filteredDots.size()) predictedDots = filteredDots.size();
+    // Check the last cluster
+    if (inCluster && currentWidth >= minWidth) {
+        clusters++;
     }
 
-    // Return the best count estimate - either actual dots or predicted pattern
-    return predictedDots;
+    // If cluster method found more dots, use that count
+    if (clusters > dotCount && clusters < 30) { // Upper limit to avoid false positives
+        dotCount = clusters;
+    }
+
+    // Strategy 4: Uniform pattern detection for evenly spaced dots
+    if (dotCount < 3) { // Only use if other methods found few dots
+        int uniformPatternCount = 0;
+        std::vector<int> peakLocations;
+
+        // Find peaks in horizontal histogram (potential dot centers)
+        for (int x = 1; x < passwordField.cols - 1; x++) {
+            if (horizontalHist[x] > horizontalHist[x - 1] &&
+                horizontalHist[x] > horizontalHist[x + 1] &&
+                horizontalHist[x] > threshold) {
+                peakLocations.push_back(x);
+            }
+        }
+
+        // Check for uniform spacing between peaks
+        if (peakLocations.size() >= 3) {
+            std::vector<int> distances;
+            for (size_t i = 1; i < peakLocations.size(); i++) {
+                distances.push_back(peakLocations[i] - peakLocations[i - 1]);
+            }
+
+            // Calculate average distance
+            int sum = 0;
+            for (int d : distances) sum += d;
+            double avgDistance = static_cast<double>(sum) / distances.size();
+
+            // Count peaks that follow the uniform pattern
+            int validPeaks = 1; // First peak is always valid
+            for (size_t i = 1; i < peakLocations.size(); i++) {
+                double ratio = (peakLocations[i] - peakLocations[i - 1]) / avgDistance;
+                if (ratio > 0.7 && ratio < 1.3) { // Within 30% of average
+                    validPeaks++;
+                }
+            }
+
+            uniformPatternCount = validPeaks;
+        }
+
+        if (uniformPatternCount > dotCount) {
+            dotCount = uniformPatternCount;
+        }
+    }
+
+    return dotCount;
 }
 
 std::string LoginDetector::extractUsernameContent(const cv::Mat& usernameField, const std::vector<WordBox>& words) {
-    // Extract from the username field region
+    // Extract just the username field region
     cv::Rect fieldRect = cv::Rect(0, 0, usernameField.cols, usernameField.rows);
 
-    // Find all words that intersect with the field
+    // Find all words that intersect with the field with improved criteria
     std::string username;
     std::vector<WordBox> fieldWords;
 
-    // First pass - find words that are definitely inside the field
     for (const auto& word : words) {
+        // Check if the word is at least partially inside the field
         cv::Rect intersection = word.box & fieldRect;
         double overlapRatio = intersection.area() / static_cast<double>(word.box.area());
 
-        if (overlapRatio > 0.6 && word.confidence > 60) {
+        // More lenient overlap requirement
+        if (overlapRatio > 0.3 && word.confidence > 40) {
             fieldWords.push_back(word);
         }
     }
 
-    // Filter out placeholder text and button labels
-    std::unordered_set<std::string> placeholderTexts = {
-        "email", "email address", "phone", "username", "user name",
-        "password", "sign in", "sign-in", "signin", "log in", "login",
-        "use a sign-in code", "sign-in code", "code", "enter code"
-    };
-
-    std::vector<WordBox> contentWords;
-    for (const auto& word : fieldWords) {
-        std::string lowerWord = word.word;
-        std::transform(lowerWord.begin(), lowerWord.end(), lowerWord.begin(), ::tolower);
-
-        bool isPlaceholder = false;
-        for (const auto& placeholder : placeholderTexts) {
-            if (lowerWord == placeholder ||
-                (placeholder.length() > 3 && lowerWord.find(placeholder) != std::string::npos)) {
-                isPlaceholder = true;
-                break;
-            }
-        }
-
-        if (!isPlaceholder) {
-            contentWords.push_back(word);
-        }
-    }
-
-    // If we found content words, use them
-    if (!contentWords.empty()) {
-        // Sort by position
-        std::sort(contentWords.begin(), contentWords.end(),
+    // If OCR found words in the field, use them
+    if (!fieldWords.empty()) {
+        // Sort words by x-coordinate
+        std::sort(fieldWords.begin(), fieldWords.end(),
             [](const WordBox& a, const WordBox& b) { return a.box.x < b.box.x; });
 
-        for (const auto& word : contentWords) {
-            if (!username.empty()) username += " ";
+        // Combine words to form username
+        for (const auto& word : fieldWords) {
+            if (!username.empty()) {
+                username += " ";
+            }
             username += word.word;
         }
-        return username;
     }
+    else {
+        // If no words found via OCR, try a dedicated OCR just for this field with enhanced processing
+        cv::Mat fieldImage = usernameField.clone();
 
-    // Quick visual check for empty fields
-    cv::Mat fieldGray;
-    cv::cvtColor(usernameField, fieldGray, cv::COLOR_BGR2GRAY);
-    cv::Scalar meanIntensity = cv::mean(fieldGray);
-    bool likelyEmpty = (meanIntensity[0] > 220 || meanIntensity[0] < 30);
+        // Enhance contrast for better OCR - improved preprocessing
+        cv::Mat enhanced;
 
-    if (likelyEmpty) {
-        return ""; // Field is likely empty
-    }
+        // Method 1: Normalize
+        cv::normalize(fieldImage, enhanced, 0, 255, cv::NORM_MINMAX);
 
-    // Perform a targeted OCR on the field with enhanced preprocessing
-    // This is a fallback for when our primary detection fails
-    cv::Mat enhancedField;
+        // Method 2: Apply CLAHE for better local contrast
+        cv::Mat gray;
+        cv::cvtColor(enhanced, gray, cv::COLOR_BGR2GRAY);
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Mat claheOutput;
+        clahe->apply(gray, claheOutput);
 
-    // Apply CLAHE for better local contrast
-    cv::Mat gray;
-    cv::cvtColor(usernameField, gray, cv::COLOR_BGR2GRAY);
-    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-    clahe->apply(gray, enhancedField);
+        // Method 3: Apply adaptive threshold for binary image
+        cv::Mat binary;
+        cv::adaptiveThreshold(claheOutput, binary, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv::THRESH_BINARY, 11, 2);
 
-    // Simple thresholding for improved text extraction
-    cv::Mat binary;
-    cv::threshold(enhancedField, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+        // Method 4: Invert if dark text on light background
+        cv::Scalar meanIntensity = cv::mean(gray);
+        if (meanIntensity[0] > 127) {
+            cv::bitwise_not(binary, binary);
+        }
 
-    // Run a targeted Tesseract OCR session
-    tesseract::TessBaseAPI tess;
-    tess.Init(NULL, "eng");
-    tess.SetPageSegMode(tesseract::PSM_SINGLE_LINE);
-    tess.SetVariable("tessedit_char_whitelist", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@._-");
+        // Run Tesseract with optimized parameters
+        tesseract::TessBaseAPI tess;
+        tess.Init(NULL, "eng");
 
-    tess.SetImage(binary.data, binary.cols, binary.rows, 1, binary.step);
+        // Try multiple image variants and use the best result
+        std::vector<cv::Mat> variants = { claheOutput, binary };
+        std::string bestText;
+        int bestConfidence = 0;
 
-    char* text = tess.GetUTF8Text();
-    if (text != NULL) {
-        username = std::string(text);
-        // Clean up the text
-        username.erase(std::remove(username.begin(), username.end(), '\n'), username.end());
-        username.erase(std::remove(username.begin(), username.end(), '\r'), username.end());
+        for (const auto& variant : variants) {
+            tess.SetImage(variant.data, variant.cols, variant.rows,
+                variant.channels(), variant.step);
+            tess.SetSourceResolution(300);
+            tess.SetPageSegMode(tesseract::PSM_SINGLE_LINE);
 
-        // Convert to lowercase for filtering
-        std::string lowerUsername = username;
-        std::transform(lowerUsername.begin(), lowerUsername.end(), lowerUsername.begin(), ::tolower);
+            // Get confidence of result
+            tess.Recognize(NULL);
+            int currentConfidence = tess.MeanTextConf();
 
-        // Final check to filter out any remaining placeholders
-        for (const auto& placeholder : placeholderTexts) {
-            if (lowerUsername == placeholder) {
-                username = "";
-                break;
+            char* text = tess.GetUTF8Text();
+            if (text != NULL) {
+                std::string currentText = std::string(text);
+                // Clean up the extracted text
+                currentText.erase(std::remove(currentText.begin(), currentText.end(), '\n'), currentText.end());
+                currentText.erase(std::remove(currentText.begin(), currentText.end(), '\r'), currentText.end());
+
+                // Keep the highest confidence result
+                if (currentConfidence > bestConfidence && !currentText.empty()) {
+                    bestConfidence = currentConfidence;
+                    bestText = currentText;
+                }
+
+                delete[] text;
             }
         }
 
-        delete[] text;
+        username = bestText;
+        tess.End();
     }
 
-    tess.End();
+    // Clean up the username text
+    // Remove common placeholder texts
+    std::vector<std::string> placeholders = {
+        "username", "user name", "email", "email address", "phone", "login", "user id"
+    };
+
+    std::string lowerUsername = username;
+    std::transform(lowerUsername.begin(), lowerUsername.end(), lowerUsername.begin(), ::tolower);
+
+    for (const auto& placeholder : placeholders) {
+        if (lowerUsername == placeholder) {
+            return ""; // Don't return placeholder text
+        }
+    }
+
     return username;
 }
 
